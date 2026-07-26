@@ -8,3 +8,7 @@
 - Prefers cloud-hosted/serverless architecture over local development — wants to eliminate local dependencies entirely and offload work to cheap/free cloud services (e.g., Render Free, Apps Script, MongoDB Atlas). Confidence: 0.8
 - Uses external uptime monitoring services (e.g., cron-job.org pinging every 10 minutes) to keep Render Free tier services awake and prevent cold-start sleep. Confidence: 0.8
 - Aggressively configures services to stay within free-tier resource limits — uses lightweight engines (e.g., NOWEB instead of Puppeteer), caps Node heap via NODE_OPTIONS, and directs ephemeral file storage to /tmp to avoid RAM/disk blowouts on 512MB instances. Confidence: 0.7
+- Cares about proper Python code structure and indentation — notices and requests correction of misplaced imports, broken indentation, or syntax issues inside function bodies. Confidence: 0.8
+- Diagnoses the root cause of bugs (e.g., mismatched tuple unpacking lengths from an API call) and provides the exact defensive fix pattern alongside the explanation, rather than simply describing the symptom and asking for a fix. Confidence: 0.6
+- References files using `@` mentions (e.g., `@"filename.gs"` or `@filename.py`) to indicate which files the assistant should open and work on. Confidence: 0.7
+- Wants precise, explicit confirmation of exactly which files were changed and which were left untouched after a code modification, rather than a summary of what was done. Confidence: 0.5

@@ -1,18 +1,30 @@
 # Python
 __pycache__/
 *.py[cod]
+*$py.class
 *.so
 *.egg-info/
 dist/
 build/
+venv/
+.venv/
+env/
 
-# Environment
+# Secrets & Credentials (CRUCIAL)
 .env
 .env.local
 .env.production
 *.env
+mongo cred.txt
+*cred*.txt
+*credential*
+*.pem
+*.key
+*.json
+!package.json
+!jsconfig.json
 
-# IDE
+# IDE & Editors
 .vscode/
 .idea/
 *.swp
@@ -22,8 +34,9 @@ build/
 .DS_Store
 Thumbs.db
 
-# Docker
-.dockerignore
+# Docker & Local Runtime
+.waha/
+sessions/
 
 # Project specific
 chroma_storage/

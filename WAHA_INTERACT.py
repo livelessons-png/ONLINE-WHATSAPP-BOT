@@ -170,8 +170,12 @@ def resolve_lid_to_number(sender_id):
 
     print(f"🔍 Attempting to resolve LID via WAHA LIDs API: {sender_id}")
 
-    # CORRECT WAHA LID ENDPOINT
-    url = f"http://127.0.0.1:3001/api/default/lids/{safe_lid}"
+    # Dynamic URL from environment variable (Render production)
+    waha_base_url = os.getenv("WAHA_URL", "https://miva-waha.onrender.com").rstrip('/')
+    url = f"{waha_base_url}/api/default/lids/{safe_lid}"
+
+    # --- OLD LOCAL CODE (Uncomment to revert back for local testing) ---
+    # url = f"http://127.0.0.1:3001/api/default/lids/{safe_lid}"
 
     try:
         response = requests.get(url, headers={"X-Api-Key": WAHA_API_KEY}, timeout=5)
@@ -265,44 +269,48 @@ def extract_profile_name(payload):
 # 📊 DATA RETRIEVAL VIA APPS SCRIPT ENGINE
 # ==========================================
 def fetch_master_schedule(sender_phone=None, sender_name=None, query_text=None, allow_query_fallback=True):
-    """Offloads matching & calendar lookup to Google Apps Script endpoint."""
+    """POSTs to Apps Script, returns (schedule, profile, faqs, error_flag)."""
     apps_script_url = get_setting("CALENDAR_APPS_SCRIPT_URL", CALENDAR_APPS_SCRIPT_URL).strip()
     if not apps_script_url:
         print("⚠️ CALENDAR_APPS_SCRIPT_URL not configured.", flush=True)
-        return [], {}
+        return [], {}, [], None
 
-    try:
-        clean_phone = normalize_phone_for_db(sender_phone)
-        params = {
-            "action": "interactive",
-            "phone": clean_phone or sender_phone or "",
-            "name": sender_name or ""
-        }
-        print(f"🔄 Requesting Apps Script interactive lookup for {clean_phone} | {sender_name}...", flush=True)
-        resp = requests.get(apps_script_url, params=params, allow_redirects=True, timeout=15)
-        
-        if resp.status_code == 200:
-            data = resp.json()
-            profile = data.get("profile") or {}
-            calendar_events = data.get("calendar_events") or []
-            if profile:
-                profile["course_code"] = profile.get("course_code") or profile.get("course code") or ""
-                profile["live_lesson_link"] = profile.get("live_lesson_link") or profile.get("live lesson link") or ""
+    payload = {
+        "sender_phone": sender_phone or "",
+        "sender_name": sender_name or "",
+        "query_text": query_text or "",
+    }
 
-                # 🛠️ ADD THIS: Normalize Operations Manager fields
-                profile["operations_manager"] = profile.get("operations_manager") or profile.get("operations manager") or "Operations Manager"
-                profile["operations_manager_email"] = profile.get("operations_manager_email") or profile.get("operations manager email") or "N/A"
+    for attempt in range(2):
+        try:
+            print(f"🔄 POSTing to Apps Script for {sender_phone} | {sender_name}...", flush=True)
+            resp = requests.post(apps_script_url, json=payload, timeout=25)
+            if resp.status_code == 200:
+                data = resp.json()
+                profile = data.get("profile") or {}
+                schedule = data.get("schedule") or []
+                faqs = data.get("faqs") or []
 
-                if not profile.get("all_course_codes"):
-                    profile["all_course_codes"] = [profile["course_code"]] if profile["course_code"] else []
+                if profile:
+                    profile["course_code"] = profile.get("course_code") or profile.get("course code") or ""
+                    profile["live_lesson_link"] = profile.get("live_lesson_link") or profile.get("live lesson link") or ""
+                    profile["operations_manager"] = profile.get("operations_manager") or profile.get("operations manager") or "Operations Manager"
+                    profile["operations_manager_email"] = profile.get("operations_manager_email") or profile.get("operations manager email") or "N/A"
+                    if not profile.get("all_course_codes"):
+                        profile["all_course_codes"] = [profile["course_code"]] if profile["course_code"] else []
 
-                print(f"🎯 Apps Script matched profile: {profile.get('name')} | Course: {profile.get('course_code')}", flush=True)
-                return calendar_events, profile
+                    print(f"🎯 Apps Script matched profile: {profile.get('name')} | Course: {profile.get('course_code')}", flush=True)
+                    return schedule, profile, faqs, None
 
-    except Exception as e:
-        print(f"⚠️ Apps Script interactive lookup failed: {e}", flush=True)
+                # Valid response but no profile found
+                return schedule, None, faqs, None
 
-    return [], {}
+        except requests.exceptions.Timeout:
+            print(f"⚠️ Apps Script timeout on attempt {attempt + 1}", flush=True)
+        except Exception as e:
+            print(f"⚠️ Apps Script connection error: {e}", flush=True)
+
+    return [], None, [], "TIMEOUT_ERROR"
 
 
 def fetch_monthly_lessons(sender_phone):
@@ -444,7 +452,7 @@ def auto_escalate_expiry_watcher(tutor_phone_norm, message_text):
     try:
         doc = db.escalate_non_response(tutor_phone_norm)
         if doc:
-            _, tutor_profile = fetch_master_schedule(sender_phone=tutor_phone_norm)
+            _, tutor_profile, _, _ = fetch_master_schedule(sender_phone=tutor_phone_norm)
             ops_manager = tutor_profile.get('operations_manager', 'Operations Manager')
             ops_manager_email = tutor_profile.get('operations_manager_email', 'Operations Manager Email' )
             tutor_name = tutor_profile.get('name', 'Lecturer')

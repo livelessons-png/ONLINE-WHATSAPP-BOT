@@ -1,0 +1,6 @@
+__pycache__
+*.pyc
+.env
+*.ps1
+.git
+README.md
