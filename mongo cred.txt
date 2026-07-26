@@ -1,0 +1,6 @@
+livelessons_db_user
+NIVwJcmC5G4cBcYP
+
+
+
+mongodb+srv://livelessons_db_user:NIVwJcmC5G4cBcYP@waha.lypzcbn.mongodb.net/?appName=waha

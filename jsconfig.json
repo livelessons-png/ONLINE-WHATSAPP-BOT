@@ -1,0 +1,22 @@
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "allowJs": true,
+    "checkJs": false,
+    "lib": [
+      "ES2020"
+    ],
+    "types": [
+      "google-apps-script"
+    ]
+  },
+  "include": [
+    "**/*.gs",
+    "**/*.js"
+  ],
+  "exclude": [
+    "node_modules"
+  ]
+}
