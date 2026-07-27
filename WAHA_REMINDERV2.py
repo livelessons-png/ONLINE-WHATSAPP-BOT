@@ -2,6 +2,7 @@ import os
 import time
 import threading
 import logging
+import random
 import requests
 from dotenv import load_dotenv
 import mongo_db as db
@@ -219,6 +220,12 @@ def fetch_and_process_reminders():
             )
 
             success = send_whatsapp_text(norm_phone, message_text)
+
+            # Human-like delay between dispatches to avoid WAHA burst flags
+            if success:
+                delay = random.uniform(10, 25)
+                logger.info(f"⏳ Waiting {delay:.0f}s before next dispatch...")
+                time.sleep(delay)
             
             # Spawn Escalation Watcher with daemon=True so it doesn't block shutdown
             if success and tier in ["24_HOURS", "4_HOURS"]:
