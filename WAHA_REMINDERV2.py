@@ -38,15 +38,19 @@ def normalize_phone_for_db(phone_str):
     return cleaned
 
 def send_whatsapp_text(to_phone, message_text):
-    """Sends a message via WAHA API."""
+    """Sends a message via WAHA API ONLY to known contacts or existing chats in the DB."""
+    clean_number = normalize_phone_for_db(to_phone)
+    if not clean_number:
+        logger.warning("⚠️ No valid phone number provided.")
+        return False
+
     url = f"{WAHA_URL}/api/sendText"
     headers = {
         "X-Api-Key": WAHA_API_KEY,
         "Content-Type": "application/json"
     }
     
-    clean_number = normalize_phone_for_db(to_phone)
-    target = f"{clean_number}@c.us" if clean_number else to_phone
+    target = f"{clean_number}@c.us"
 
     payload = {
         "session": WAHA_SESSION,
@@ -57,13 +61,20 @@ def send_whatsapp_text(to_phone, message_text):
     
     try:
         res = requests.post(url, headers=headers, json=payload, timeout=10)
+        
         if res.status_code in [200, 201]:
             logger.info(f"✅ WAHA message dispatched to {clean_number}")
             return True
+        elif res.status_code in [400, 404]:
+            # WAHA drops it because they haven't engaged or aren't a saved contact in your DB
+            logger.warning(f"🚫 Skipped {clean_number}: Unengaged/Cold number rejected by WAHA.")
+            return False
         else:
             logger.warning(f"⚠️ WAHA dispatch failed with status {res.status_code}: {res.text}")
+            
     except Exception as e:
         logger.error(f"❌ WAHA Connection Error: {e}")
+        
     return False
 
 # ==========================================

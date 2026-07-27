@@ -296,10 +296,20 @@ def fetch_master_schedule(sender_phone=None, sender_name=None, query_text=None, 
                     profile["live_lesson_link"] = profile.get("live_lesson_link") or profile.get("live lesson link") or ""
                     profile["operations_manager"] = profile.get("operations_manager") or profile.get("operations manager") or "Operations Manager"
                     profile["operations_manager_email"] = profile.get("operations_manager_email") or profile.get("operations manager email") or "N/A"
-                    if not profile.get("all_course_codes"):
-                        profile["all_course_codes"] = [profile["course_code"]] if profile["course_code"] else []
 
-                    print(f"🎯 Apps Script matched profile: {profile.get('name')} | Course: {profile.get('course_code')}", flush=True)
+                    # Multi-course support — handle flat string array from Apps Script
+                    raw_courses = data.get("courses") or []
+                    if raw_courses and isinstance(raw_courses[0], str):
+                        courses = [{"code": c} for c in raw_courses]
+                    elif not raw_courses and profile.get("course_code"):
+                        courses = [{"code": profile["course_code"], "live_lesson_link": profile.get("live_lesson_link", ""), "name": ""}]
+                    else:
+                        courses = raw_courses
+                    profile["courses"] = courses
+                    if not profile.get("all_course_codes"):
+                        profile["all_course_codes"] = [c["code"] for c in courses if c.get("code")] if courses else [profile.get("course_code", "")]
+
+                    print(f"🎯 Apps Script matched profile: {profile.get('name')} | Courses: {', '.join(profile['all_course_codes'])}", flush=True)
                     return schedule, profile, faqs, None
 
                 # Valid response but no profile found
@@ -377,42 +387,38 @@ def _is_live_lessons_query(user_query):
 # 💬 WAHA OUTBOUND & EMAIL ALERTS
 # ==========================================
 def send_whatsapp_text(to_phone, message_text):
+    """Sends a message via WAHA API ONLY to known contacts or existing chats in the DB."""
+    clean_number = normalize_phone_for_db(to_phone)
+    if not clean_number:
+        print(f"⚠️ No valid phone number provided: {to_phone}", flush=True)
+        return False
+
     url = f"{WAHA_URL}/api/sendText"
     headers = {
         "X-Api-Key": WAHA_API_KEY,
         "Content-Type": "application/json"
     }
 
-    raw_target = str(to_phone or "").strip()
-    targets = []
-    clean_number = normalize_phone_for_db(raw_target)
-    preferred_route = get_preferred_delivery_route(raw_target)
+    target = f"{clean_number}@c.us"
+    payload = {
+        "session": WAHA_SESSION,
+        "chatId": target,
+        "text": message_text,
+        "linkPreview": False
+    }
 
-    if preferred_route:
-        targets.append(preferred_route)
-    if clean_number:
-        targets.append(f"{clean_number}@c.us")
-    targets.append(raw_target)
-
-    deduped_targets = []
-    for t in targets:
-        if t and t not in deduped_targets:
-            deduped_targets.append(t)
-
-    for chat_id in deduped_targets:
-        payload = {
-            "session": WAHA_SESSION,
-            "chatId": chat_id,
-            "text": message_text,
-            "linkPreview": False
-        }
-        try:
-            res = requests.post(url, headers=headers, json=payload, timeout=25)
-            if res.status_code in [200, 201]:
-                remember_successful_delivery_route(raw_target, chat_id)
-                return True
-        except Exception as e:
-            print(f"❌ WAHA Dispatch Error: {e}", flush=True)
+    try:
+        res = requests.post(url, headers=headers, json=payload, timeout=25)
+        if res.status_code in [200, 201]:
+            remember_successful_delivery_route(to_phone, target)
+            return True
+        elif res.status_code in [400, 404]:
+            print(f"🚫 Skipped {clean_number}: Unengaged/Cold number rejected by WAHA.", flush=True)
+            return False
+        else:
+            print(f"⚠️ WAHA dispatch failed with status {res.status_code}: {res.text}", flush=True)
+    except Exception as e:
+        print(f"❌ WAHA Dispatch Error: {e}", flush=True)
 
     return False
 
@@ -577,6 +583,95 @@ def _is_greeting_only(user_query):
 
     return all(w in common_greetings or w in fillers for w in words)
 
+
+def generate_conversational_reply(user_message, user_data):
+    """
+    Generates a fluid, intelligent reply using OpenAI.
+    
+    Args:
+        user_message: The raw text from the user.
+        user_data: Dict containing profile, schedule, faqs, courses,
+                   current_time, tutor_name, ops_manager fields, chat_history.
+
+    Returns:
+        Generated reply string.
+    """
+    profile = user_data.get("profile", {})
+    schedule = user_data.get("schedule", [])
+    monthly_events = user_data.get("monthly_events", [])
+    faqs = user_data.get("faqs", [])
+    courses = user_data.get("courses", [])
+    current_time = user_data.get("current_time", "")
+    tutor_name = user_data.get("tutor_name", "there")
+    ops_manager_name = user_data.get("ops_manager_name", "Operations Manager")
+    ops_manager_email = user_data.get("ops_manager_email", "")
+    chat_history = user_data.get("chat_history", [])
+
+    # Format schedule
+    schedule_text = "\n".join(
+        f"- {row.get('course_code_calendar')}, {row.get('lecture_day')} at {row.get('lecture_time')}, Room: {row.get('room_link')}"
+        for row in schedule
+    ) if schedule else "No live sessions scheduled for today."
+
+    # Format monthly events across all courses
+    monthly_text = "\n".join(
+        f"- {row.get('course_code') or row.get('course_code_calendar')}, {row.get('lecture_day')} at {row.get('lecture_time') or row.get('start_time')}"
+        for row in monthly_events
+    ) if monthly_events else "No monthly lesson data available."
+
+    # Format courses
+    courses_text = "\n".join(
+        f"  • {c['code']}{' - ' + c.get('name', '') if c.get('name') else ''}"
+        for c in courses if c.get('code')
+    ) if courses else "  No courses assigned."
+
+    # Format FAQs
+    faqs_text = "\n".join(
+        f"Q: {item['q']}\nA: {item['a']}"
+        for item in faqs
+    ) if faqs else "No additional FAQ entries provided."
+
+    system_prompt = f"""You are the MIVA Academic Assistant — a sharp, empathetic, and genuinely helpful AI assistant for lecturers at Miva Open University.
+
+CONVERSATIONAL INTELLIGENCE:
+Communicate like a thoughtful human assistant. Adapt your tone to the user's emotional state — show empathy if they mention being sick/stressed, respond warmly to greetings, engage naturally with casual remarks. Do not give robotic one-liners or repetitive stock responses.
+
+STRICT FACT GUARDRAILS:
+You are free to be creative and conversational in tone, but ALL hard facts (schedules, course codes, lesson links, dates, departments, statuses) MUST come strictly from the LIVE DATABASE RECORD below. If a fact is missing from the record, warmly explain that you don't have access to that specific information yet instead of guessing.
+
+ESCALATION PROTOCOL:
+If the user reports an issue that requires human staff intervention (such as illness/absence, missing live lesson links, technical portal errors, or explicitly asking for a human/manager), you MUST append '[TRIGGER_ESCALATION: <Issue Type>]' at the very end of your response text. Examples: '[TRIGGER_ESCALATION: Lecturer Absence]' or '[TRIGGER_ESCALATION: Missing Link]'. Do NOT include this tag for casual conversation, greetings, or simple data queries.
+
+LIVE DATABASE RECORD:
+- System Time: {current_time}
+- Lecturer Name: {tutor_name}
+- Operations Manager: {ops_manager_name} ({ops_manager_email})
+- ASSIGNED COURSES:
+{courses_text}
+- TODAY'S SCHEDULE:
+{schedule_text}
+- MONTHLY LESSONS (all courses):
+{monthly_text}
+- FAQ KNOWLEDGE BASE:
+{faqs_text}"""
+
+    messages = [{"role": "system", "content": system_prompt}]
+    if chat_history:
+        messages.extend(chat_history)
+    messages.append({"role": "user", "content": user_message})
+
+    try:
+        response = ai_client.chat.completions.create(
+            model="gpt-4.1-mini",
+            messages=messages,
+            temperature=0.4,
+        )
+        return str(response.choices[0].message.content or "").strip()
+    except Exception as e:
+        print(f"⚠️ OpenAI generation error: {e}", flush=True)
+        return "I'm sorry, I'm having trouble processing that right now. Please try again in a moment."
+
+
 ## ==========================================
 # ⚡ CORE WHATSAPP INBOUND WORKER
 # ==========================================
@@ -597,14 +692,18 @@ def background_processor(body):
             return
 
         tutor_phone_norm = normalize_phone_for_db(tutor_phone_raw)
-        
+
+        # Silent drop: non-text messages (media, reactions, contacts, etc.)
+        msg_type = payload.get("type") or ""
         has_media = is_truthy_flag(payload.get("hasMedia") or payload.get("_data", {}).get("hasMedia"))
-        if has_media:
-            send_whatsapp_text(tutor_phone_raw, "I can only process text messages.")
+        silent_types = {"image", "audio", "ptt", "sticker", "document", "reaction", "vcard", "location", "poll"}
+        if has_media or msg_type in silent_types:
+            print(f"🔇 Silently dropped non-text message type={msg_type or 'media'} from {tutor_phone_norm}", flush=True)
             return
 
         user_query = extract_message_text(payload)
         if not user_query:
+            print(f"🔇 Silently dropped empty message from {tutor_phone_norm}", flush=True)
             return
 
         print(f"📥 Processing message from {tutor_phone_norm}: '{user_query}'", flush=True)
@@ -637,12 +736,16 @@ def background_processor(body):
             )
             return
 
-        # Normalize Profile Fields
+        # Normalize Profile Fields — Multi-course support
         tutor_name = tutor_profile.get("name") or whatsapp_profile_name
-        sheet_course_code = tutor_profile.get("course_code") or ""
+        courses = tutor_profile.get("courses") or []
+        if not courses and tutor_profile.get("course_code"):
+            courses = [{"code": tutor_profile["course_code"], "live_lesson_link": tutor_profile.get("live_lesson_link", ""), "name": ""}]
+        sheet_course_codes = [c["code"] for c in courses if c.get("code")] or [tutor_profile.get("course_code", "")]
         ops_manager_name = tutor_profile.get("operations_manager") or "Operations Manager"
         ops_manager_email = tutor_profile.get("operations_manager_email") or ""
-        live_lesson_link = tutor_profile.get("live_lesson_link") or ""
+        # Primary course link fallback
+        live_lesson_link = tutor_profile.get("live_lesson_link") or (courses[0].get("live_lesson_link", "") if courses else "")
 
         # Consent Lifecycle Check
         old_lid_norm = normalize_phone_for_db(tutor_phone_raw_before_resolve)
@@ -658,168 +761,66 @@ def background_processor(body):
         except Exception:
             pass
 
-        normalized_query = user_query.lower().strip()
-
         # ----------------------------------------------------
-        # 🚨 1. AVAILABILITY SIGNAL INTERCEPT (CONFIRM / DECLINE / SICK)
+        # 🧠 INTELLIGENT CONVERSATIONAL BRAIN
         # ----------------------------------------------------
+        # Availability side-effects: maintain DB records regardless of LLM response
         is_confirming, is_declining = _availability_signal(user_query)
-        if is_confirming or is_declining:
+        if is_declining:
             doc = db.get_latest_sent_reminder(tutor_phone_norm)
-            
-            if is_confirming:
-                if doc:
-                    db.confirm_reminder(doc["_id"], tutor_phone_norm)
-                
-                confirm_reply = f"Thank you {tutor_name}! Your attendance for your upcoming class has been confirmed."
-                save_chat_turn(tutor_phone_norm, "assistant", confirm_reply)
-                send_whatsapp_text(tutor_phone_raw, confirm_reply)
-                log_interaction(tutor_phone_norm, user_query, confirm_reply)
-                return
-
-            elif is_declining:
-                if doc:
-                    db.escalate_reminder(doc["_id"], tutor_phone_norm)
-                
-                send_operational_alert(ops_manager_email, tutor_name, sheet_course_code, f"Unavailable/Sick: {user_query}")
-                
-                decline_reply = (
-                    f"Thank you for letting us know, {tutor_name}.\n\n"
-                    f"We have logged your unavailability and notified your Operations Manager (*{ops_manager_name}*) "
-                    f"to arrange coverage for your class."
-                )
-                save_chat_turn(tutor_phone_norm, "assistant", decline_reply)
-                send_whatsapp_text(tutor_phone_raw, decline_reply)
-                log_interaction(tutor_phone_norm, user_query, decline_reply)
-                return
-
-        # ----------------------------------------------------
-        # 🔒 2. SECURITY & POLICY RISK FILTER (Restricted Topics)
-        # ----------------------------------------------------
-        sensitive_keywords = ["grade", "result", "score", "salary", "payroll", "pay", "stipend", "compensation"]
-        if any(keyword in normalized_query for keyword in sensitive_keywords):
-            email_info = f" ({ops_manager_email})" if ops_manager_email else ""
-            escalation_text = (
-                f"I am restricted from processing requests regarding grades, results, salary, or payroll.\n\n"
-                f"Please contact your Operations Manager, *{ops_manager_name}*{email_info}, for assistance."
-            )
-            save_chat_turn(tutor_phone_norm, "assistant", escalation_text)
-            send_whatsapp_text(tutor_phone_raw, escalation_text)
-            log_interaction(tutor_phone_norm, user_query, escalation_text)
-            return
-
-        # ----------------------------------------------------
-        # ⚡ 3. GREETING FAST INTERCEPT
-        # ----------------------------------------------------
-        if _is_greeting_only(normalized_query):
-            greeting_reply = f"Hello {tutor_name}! 👋 How can I assist you with your live lessons or schedule today?"
-            save_chat_turn(tutor_phone_norm, "assistant", greeting_reply)
-            send_whatsapp_text(tutor_phone_raw, greeting_reply)
-            log_interaction(tutor_phone_norm, user_query, greeting_reply)
-            return
-
-        # ----------------------------------------------------
-        # ⚡ 4. SPECIFIC FIELD INTERCEPTS
-        # ----------------------------------------------------
-        if any(k in normalized_query for k in ["course code", "my code"]):
-            reply = f"Your assigned course code is {sheet_course_code}." if sheet_course_code else "No course code is currently assigned to your record."
-            save_chat_turn(tutor_phone_norm, "assistant", reply)
-            send_whatsapp_text(tutor_phone_raw, reply)
-            log_interaction(tutor_phone_norm, user_query, reply)
-            return
-
-        if any(k in normalized_query for k in ["ops manager", "operations manager", "my manager"]):
-            reply = f"Your Operations Manager is {ops_manager_name}."
-            if ops_manager_email:
-                reply += f" You can reach them via email at: {ops_manager_email}"
-            save_chat_turn(tutor_phone_norm, "assistant", reply)
-            send_whatsapp_text(tutor_phone_raw, reply)
-            log_interaction(tutor_phone_norm, user_query, reply)
-            return
-
-        if any(k in normalized_query for k in ["meeting link", "lesson link", "zoom link", "class link", "room link"]):
-            reply = f"Your live lesson link is: {live_lesson_link}" if live_lesson_link else "No live lesson link is currently configured on your record. Please contact your Operations Manager."
-            save_chat_turn(tutor_phone_norm, "assistant", reply)
-            send_whatsapp_text(tutor_phone_raw, reply)
-            log_interaction(tutor_phone_norm, user_query, reply)
-            return
-
-        matched_email = tutor_profile.get('email', '')
-        if any(k in normalized_query for k in ["email", "my email", "email address"]):
-            email_reply = f"Your registered email address is: {matched_email}" if matched_email else "No email address found on your record."
-            save_chat_turn(tutor_phone_norm, "assistant", email_reply)
-            send_whatsapp_text(tutor_phone_raw, email_reply)
-            log_interaction(tutor_phone_norm, user_query, email_reply)
-            return
-
-        # If they ask for their full monthly schedule
-        if _is_live_lessons_query(user_query):
-            monthly_events = fetch_monthly_lessons(tutor_phone_norm)
-            monthly_reply = format_monthly_lessons_response(monthly_events)
-            save_chat_turn(tutor_phone_norm, "assistant", monthly_reply)
-            send_whatsapp_text(tutor_phone_raw, monthly_reply)
-            log_interaction(tutor_phone_norm, user_query, monthly_reply)
-            return
-
-        # ----------------------------------------------------
-        # 🧠 5. OPENAI GENERATOR (INCLUDES LIVE SHEET FAQS)
-        # ----------------------------------------------------
-        # Prepare the FAQ text
-        formatted_faqs = ""
-        if faqs:
-            for item in faqs:
-                formatted_faqs += f"Q: {item['q']}\nA: {item['a']}\n\n"
-        else:
-            formatted_faqs = "No additional FAQ entries provided."
-
-        # Prepare the Daily Schedule text
-        formatted_schedule_text = ""
-        if current_schedule:
-            for row in current_schedule:
-                formatted_schedule_text += f"- Course: {row.get('course_code_calendar')}, Day/Time: {row.get('lecture_day')} at {row.get('lecture_time')}, Room: {row.get('room_link')}\n"
-        else:
-            formatted_schedule_text = "No live sessions scheduled for today."
+            if doc:
+                db.escalate_reminder(doc["_id"], tutor_phone_norm)
+        elif is_confirming:
+            doc = db.get_latest_sent_reminder(tutor_phone_norm)
+            if doc:
+                db.confirm_reminder(doc["_id"], tutor_phone_norm)
 
         wat_tz = pytz.timezone("Africa/Lagos")
         current_time_wat = datetime.datetime.now(wat_tz).strftime("%A, %B %d, %Y at %I:%M %p")
 
-        # Inject everything into OpenAI's system prompt
-        system_prompt = f"""
-You are the Lecturer Support Assistant for Miva Open University.
-Personality: Highly intelligent, efficient, polite human coordinator.
+        user_data = {
+            "profile": tutor_profile,
+            "schedule": current_schedule,
+            "monthly_events": fetch_monthly_lessons(tutor_phone_norm),
+            "faqs": faqs,
+            "courses": courses,
+            "current_time": current_time_wat,
+            "tutor_name": tutor_name,
+            "ops_manager_name": ops_manager_name,
+            "ops_manager_email": ops_manager_email,
+        }
 
-STRICT RULES:
-1. Max 2 short sentences. Get straight to the point.
-2. DO NOT state or report whether the lecturer has a class today UNLESS they explicitly asked about their schedule, classes, or teaching status.
-3. If the user's query matches a question in the FAQ KNOWLEDGE BASE below, answer strictly using that information.
-4. If the user is engaging in general conversation or greeting, respond naturally and politely.
-5. No bold asterisks (*) or markdown formatting.
-
-FAQ KNOWLEDGE BASE:
-{formatted_faqs}
-
-CONTEXT:
-- System Time: {current_time_wat}
-- Lecturer Name: {tutor_name}
-- Manager Contact: {ops_manager_name} ({ops_manager_email})
-- Assigned Course Code: {sheet_course_code}
-- Live Lesson Link: {live_lesson_link or 'Check Portal'}
-- SCHEDULE DATA:
-{formatted_schedule_text}
-"""
         save_chat_turn(tutor_phone_norm, "user", user_query)
         conversation_history = get_recent_history(tutor_phone_norm)
+        user_data["chat_history"] = conversation_history
 
-        messages_payload = [{"role": "system", "content": system_prompt}] + conversation_history
+        raw_reply = generate_conversational_reply(user_query, user_data)
 
-        ai_response = ai_client.chat.completions.create(
-            model=FAQ_REPLY_MODEL,
-            messages=messages_payload,
-            temperature=0.4
-        )
+        # Check for escalation trigger tag from LLM
+        escalation_match = re.search(r'\[TRIGGER_ESCALATION:\s*(.+?)\]', raw_reply)
+        issue_type = escalation_match.group(1).strip() if escalation_match else None
+        final_reply = re.sub(r'\s*\[TRIGGER_ESCALATION:[^\]]*\]', '', raw_reply).strip()
 
-        final_reply = str(ai_response.choices[0].message.content or "").strip()
-        
+        # If LLM flagged escalation, fire POST to Apps Script
+        if issue_type:
+            try:
+                apps_script_url = get_setting("CALENDAR_APPS_SCRIPT_URL", CALENDAR_APPS_SCRIPT_URL).strip()
+                if apps_script_url:
+                    escalation_payload = {
+                        "action": "escalate",
+                        "sender_phone": tutor_phone_raw,
+                        "sender_name": tutor_name,
+                        "query_text": user_query,
+                        "issue_type": issue_type,
+                    }
+                    threading.Thread(
+                        target=lambda: requests.post(apps_script_url, json=escalation_payload, timeout=15),
+                        daemon=True,
+                    ).start()
+                    print(f"🚀 Escalation '{issue_type}' fired to Apps Script for {tutor_name}", flush=True)
+            except Exception as e:
+                print(f"⚠️ Escalation POST failed: {e}", flush=True)
+
         save_chat_turn(tutor_phone_norm, "assistant", final_reply)
         send_whatsapp_text(tutor_phone_raw, final_reply)
         log_interaction(tutor_phone_norm, user_query, final_reply)
