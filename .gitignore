@@ -38,6 +38,9 @@ Thumbs.db
 .waha/
 sessions/
 
+# Command Code
+.commandcode/
+
 # Project specific
 chroma_storage/
 *.db
