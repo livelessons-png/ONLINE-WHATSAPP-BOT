@@ -13,62 +13,77 @@ function doGet(e) {
     var calendar = CalendarApp.getDefaultCalendar();
 
     // ==========================================
-    // 🚦 ROUTE: AUTOMATED REMINDER DAEMON POLL
+    // 🚦 ROUTE: AUTOMATED REMINDER DAEMON POLL (FAST - flipped logic)
     // ==========================================
     if (action === "reminders") {
       var reminders = [];
-      var profiles = getAllProfiles(ss);
       
-      if (profiles.length === 0) {
-        return ContentService.createTextOutput(JSON.stringify({ reminders: [] })).setMimeType(ContentService.MimeType.JSON);
-      }
-
-      // Scan calendar events from NOW up to the next 25 hours
+      // 1. Fetch calendar events for the next 25 hours
       var future25h = new Date(now.getTime() + (25 * 60 * 60 * 1000));
       var calEvents = calendar.getEvents(now, future25h);
 
+      if (calEvents.length === 0) {
+        return ContentService.createTextOutput(JSON.stringify({ reminders: [] })).setMimeType(ContentService.MimeType.JSON);
+      }
+
+      // 2. Filter ONLY events that land inside one of the 3 reminder windows
+      var activeEvents = [];
+      calEvents.forEach(function(ev) {
+        var diffMs = ev.getStartTime().getTime() - now.getTime();
+        var diffMins = Math.floor(diffMs / (1000 * 60));
+        var tier = null;
+
+        // 24_HOURS Tier (23h 45m to 24h 15m)
+        if (diffMins >= 1425 && diffMins <= 1455) {
+          tier = "24_HOURS";
+        }
+        // 4_HOURS Tier (3h 45m to 4h 15m)
+        else if (diffMins >= 225 && diffMins <= 255) {
+          tier = "4_HOURS";
+        }
+        // 10_MINUTES Tier (5m to 15m)
+        else if (diffMins >= 5 && diffMins <= 15) {
+          tier = "10_MINUTES";
+        }
+
+        if (tier) {
+          activeEvents.push({
+            event: ev,
+            tier: tier,
+            text: (ev.getTitle() + " " + ev.getLocation() + " " + ev.getDescription()).toLowerCase().replace(/[^a-z0-9]/g, '')
+          });
+        }
+      });
+
+      // 3. FAST EXIT: If no classes are due for a reminder right now, stop immediately!
+      if (activeEvents.length === 0) {
+        return ContentService.createTextOutput(JSON.stringify({ reminders: [] })).setMimeType(ContentService.MimeType.JSON);
+      }
+
+      // 4. ONLY read sheet profiles if an active event exists
+      var profiles = getAllProfiles(ss);
+
       profiles.forEach(function(p) {
         if (!p.courses || p.courses.length === 0) return;
-        
         var normalizedCourses = p.courses.map(function(c) { return String(c).toLowerCase().replace(/[^a-z0-9]/g, ''); });
 
-        calEvents.forEach(function(ev) {
-          var text = (ev.getTitle() + " " + ev.getLocation() + " " + ev.getDescription()).toLowerCase().replace(/[^a-z0-9]/g, '');
-          var matchesCourse = normalizedCourses.some(function(codeNorm) { return codeNorm && text.includes(codeNorm); });
-
+        activeEvents.forEach(function(item) {
+          var matchesCourse = normalizedCourses.some(function(codeNorm) { return codeNorm && item.text.includes(codeNorm); });
+          
           if (matchesCourse) {
-            var diffMs = ev.getStartTime().getTime() - now.getTime();
-            var diffMins = Math.floor(diffMs / (1000 * 60));
-
-            var tier = null;
-
-            // 24_HOURS Tier: 23h45m to 24h15m away (1425-1455 mins)
-            if (diffMins >= 1425 && diffMins <= 1455) {
-              tier = "24_HOURS";
-            }
-            // 4_HOURS Tier: 3h45m to 4h15m away (225-255 mins)
-            else if (diffMins >= 225 && diffMins <= 255) {
-              tier = "4_HOURS";
-            }
-            // 10_MINUTES Tier: 5m to 15m away
-            else if (diffMins >= 5 && diffMins <= 15) {
-              tier = "10_MINUTES";
-            }
-
-            if (tier) {
-              reminders.push({
-                id: (p.phone || "user") + "_" + ev.getTitle() + "_" + ev.getStartTime().getTime() + "_" + tier,
-                phone: p.phone,
-                name: p.name,
-                course_code: ev.getTitle(),
-                lecture_day: Utilities.formatDate(ev.getStartTime(), "Africa/Lagos", "EEEE, MMMM dd"),
-                lecture_time: Utilities.formatDate(ev.getStartTime(), "Africa/Lagos", "hh:mm a"),
-                room_link: ev.getLocation() || p.live_lesson_link || "Check Portal",
-                tier: tier,
-                ops_manager: p.operations_manager,
-                ops_email: p.operations_manager_email
-              });
-            }
+            var ev = item.event;
+            reminders.push({
+              id: (p.phone || "user") + "_" + ev.getTitle() + "_" + ev.getStartTime().getTime() + "_" + item.tier,
+              phone: p.phone,
+              name: p.name,
+              course_code: ev.getTitle(),
+              lecture_day: Utilities.formatDate(ev.getStartTime(), "Africa/Lagos", "EEEE, MMMM dd"),
+              lecture_time: Utilities.formatDate(ev.getStartTime(), "Africa/Lagos", "hh:mm a"),
+              room_link: extractMeetingLink(ev, p.live_lesson_link),
+              tier: item.tier,
+              ops_manager: p.operations_manager,
+              ops_email: p.operations_manager_email
+            });
           }
         });
       });
@@ -77,7 +92,7 @@ function doGet(e) {
     }
 
     // ==========================================
-    // 🚦 ROUTE: INTERACTIVE WAHA BOT LOOKUP
+    // 🚦 ROUTE: INTERACTIVE WAHA BOT LOOKUP (FIXED: Meet links + full-day range)
     // ==========================================
     if (action === "interactive") {
       var profile = getProfile(ss, e.parameter.phone, e.parameter.name);
@@ -85,19 +100,30 @@ function doGet(e) {
       var courses = (profile && profile.courses) || [];
       
       if (profile && courses.length > 0) {
-        var future = new Date(now.getTime() + (24 * 60 * 60 * 1000));
-        var calEvents = calendar.getEvents(now, future);
+        // Query from start of today to 7 days ahead so today's classes never vanish
+        var startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0);
+        var endWindow = new Date(now.getTime() + (7 * 24 * 60 * 60 * 1000));
+        var calEvents = calendar.getEvents(startOfToday, endWindow);
+        var normalizedCourses = courses.map(function(c) { return String(c).toLowerCase().replace(/[^a-z0-9]/g, ''); });
+        
+        // Build a lookup: course code → per-row link from the sheet
+        var courseLinkMap = {};
+        if (profile.courses_with_links) {
+          profile.courses_with_links.forEach(function(cwl) { courseLinkMap[cwl.code] = cwl.link; });
+        }
         
         calEvents.forEach(function(ev) {
-          var text = (ev.getTitle() + " " + ev.getLocation() + " " + ev.getDescription()).toLowerCase();
-          for (var ci = 0; ci < courses.length; ci++) {
-            var codeNorm = String(courses[ci]).toLowerCase().replace(/[^a-z0-9]/g, '');
+          var text = (ev.getTitle() + " " + ev.getLocation() + " " + ev.getDescription()).toLowerCase().replace(/[^a-z0-9]/g, '');
+          for (var ci = 0; ci < normalizedCourses.length; ci++) {
+            var codeNorm = normalizedCourses[ci];
             if (codeNorm && text.includes(codeNorm)) {
+              var matchedCourse = profile.courses[ci];
+              var perCourseLink = courseLinkMap[matchedCourse] || profile.live_lesson_link;
               events.push({
                 course_code_calendar: ev.getTitle(),
-                lecture_day: Utilities.formatDate(ev.getStartTime(), "Africa/Lagos", "EEEE, MMMM dd"),
+                lecture_day: Utilities.formatDate(ev.getStartTime(), "Africa/Lagos", "EEEE, MMMM dd, yyyy"),
                 lecture_time: Utilities.formatDate(ev.getStartTime(), "Africa/Lagos", "hh:mm a"),
-                room_link: ev.getLocation() || profile.live_lesson_link || "No Link Provided"
+                room_link: extractMeetingLink(ev, perCourseLink)
               });
               break;
             }
@@ -130,7 +156,7 @@ function doGet(e) {
                 lecture_day: Utilities.formatDate(ev.getStartTime(), "Africa/Lagos", "EEEE, dd MMMM"),
                 lecture_time: Utilities.formatDate(ev.getStartTime(), "Africa/Lagos", "hh:mm a"),
                 lecture_end_time: Utilities.formatDate(ev.getEndTime(), "Africa/Lagos", "hh:mm a"),
-                room_link: ev.getLocation() || profileMonth.live_lesson_link || "No Link Provided"
+                room_link: extractMeetingLink(ev, profileMonth.live_lesson_link)
               });
               break;
             }
@@ -192,7 +218,7 @@ function doPost(e) {
     // 1. Fetch Profile
     var profile = getProfile(ss, senderPhone, senderName);
 
-    // 2. Fetch Today's Calendar Schedule (multi-course)
+    // 2. Fetch Today's Calendar Schedule (multi-course, per-row links)
     var schedule = [];
     if (profile && profile.courses && profile.courses.length > 0) {
       var calendar = CalendarApp.getDefaultCalendar();
@@ -200,17 +226,25 @@ function doPost(e) {
       var startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0);
       var endOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59);
       var todayEvents = calendar.getEvents(startOfDay, endOfDay);
+      
+      var courseLinkMap = {};
+      if (profile.courses_with_links) {
+        profile.courses_with_links.forEach(function(cwl) { courseLinkMap[cwl.code] = cwl.link; });
+      }
+      
       for (var ei = 0; ei < todayEvents.length; ei++) {
         var evt = todayEvents[ei];
         var text = (evt.getTitle() + " " + evt.getLocation() + " " + evt.getDescription()).toLowerCase();
         for (var ci = 0; ci < profile.courses.length; ci++) {
           var codeNorm = String(profile.courses[ci]).toLowerCase().replace(/[^a-z0-9]/g, '');
           if (codeNorm && text.includes(codeNorm)) {
+            var matchedCourse = profile.courses[ci];
+            var perCourseLink = courseLinkMap[matchedCourse] || profile.live_lesson_link;
             schedule.push({
               course_code_calendar: evt.getTitle(),
               lecture_day: Utilities.formatDate(evt.getStartTime(), "Africa/Lagos", "EEEE, MMMM dd"),
               lecture_time: Utilities.formatDate(evt.getStartTime(), "Africa/Lagos", "hh:mm a"),
-              room_link: evt.getLocation() || profile.live_lesson_link || "Check Portal"
+              room_link: extractMeetingLink(evt, perCourseLink)
             });
             break;
           }
@@ -242,6 +276,30 @@ function doPost(e) {
 // ==========================================
 // 🛠️ SHARED HELPER FUNCTIONS
 // ==========================================
+
+/**
+ * Extracts Google Meet link from Calendar Event with fallback to profile link.
+ * Checks: hangout link → description regex → location → sheet fallback.
+ */
+function extractMeetingLink(ev, fallbackLink) {
+  // 1. Native Google Calendar Meet link property
+  try {
+    var hangout = ev.getHangoutLink();
+    if (hangout && hangout.length > 5) return hangout;
+  } catch (err) {}
+
+  // 2. Check Description for meet.google.com link
+  var desc = ev.getDescription() || "";
+  var meetMatch = desc.match(/https?:\/\/meet\.google\.com\/[a-z0-9\-]+/i);
+  if (meetMatch) return meetMatch[0];
+
+  // 3. Location field check
+  var loc = ev.getLocation() || "";
+  if (loc.toLowerCase().includes("http")) return loc;
+
+  // 4. Fallback to Mapping Sheet default link
+  return fallbackLink || "Check MIVA Portal";
+}
 
 /**
  * Finds ALL rows matching a lecturer and aggregates all assigned courses.
@@ -282,6 +340,7 @@ function getProfile(ss, searchPhone, searchName) {
 
   var matchedProfile = null;
   var allCourseCodes = [];
+  var coursesWithLinks = [];
 
   for (var i = 1; i < data.length; i++) {
     var row = data[i];
@@ -313,14 +372,16 @@ function getProfile(ss, searchPhone, searchName) {
         };
       }
 
-      // Collect course code from this row (handle comma-separated in one cell too)
+      // Collect course code with its per-row meeting link
       var rawCourse = courseIdx !== -1 ? String(row[courseIdx] || "").trim() : "";
+      var rowLink = linkIdx !== -1 ? String(row[linkIdx] || "").trim() : "";
       if (rawCourse) {
         var parts = rawCourse.split(/[,;]/);
         for (var p = 0; p < parts.length; p++) {
           var code = parts[p].trim();
           if (code && allCourseCodes.indexOf(code) === -1) {
             allCourseCodes.push(code);
+            coursesWithLinks.push({ code: code, link: rowLink || "" });
           }
         }
       }
@@ -330,6 +391,7 @@ function getProfile(ss, searchPhone, searchName) {
   if (!matchedProfile) return null;
 
   matchedProfile.courses = allCourseCodes;
+  matchedProfile.courses_with_links = coursesWithLinks;
   matchedProfile.course_code = allCourseCodes.length > 0 ? allCourseCodes[0] : "";
   matchedProfile.all_course_codes = allCourseCodes;
   return matchedProfile;

@@ -147,7 +147,7 @@ def fetch_and_process_reminders():
     logger.info("🔄 Polling Google Apps Script for active reminders...")
     
     try:
-        resp = requests.get(APPS_SCRIPT_URL, params={"action": "reminders"}, timeout=30)
+        resp = requests.get(APPS_SCRIPT_URL, params={"action": "reminders"}, timeout=60)
         
         if resp.status_code != 200:
             logger.warning(f"⚠️ Apps Script returned status {resp.status_code}")

@@ -297,17 +297,19 @@ def fetch_master_schedule(sender_phone=None, sender_name=None, query_text=None, 
                     profile["operations_manager"] = profile.get("operations_manager") or profile.get("operations manager") or "Operations Manager"
                     profile["operations_manager_email"] = profile.get("operations_manager_email") or profile.get("operations manager email") or "N/A"
 
-                    # Multi-course support — handle flat string array from Apps Script
-                    raw_courses = data.get("courses") or []
-                    if raw_courses and isinstance(raw_courses[0], str):
-                        courses = [{"code": c} for c in raw_courses]
-                    elif not raw_courses and profile.get("course_code"):
+                    # Multi-course support — read from profile (already aggregated by Apps Script)
+                    profile_courses = profile.get("courses") or []
+                    if isinstance(profile_courses, list) and len(profile_courses) > 0:
+                        if isinstance(profile_courses[0], str):
+                            courses = [{"code": c} for c in profile_courses]
+                        else:
+                            courses = profile_courses
+                    elif profile.get("course_code"):
                         courses = [{"code": profile["course_code"], "live_lesson_link": profile.get("live_lesson_link", ""), "name": ""}]
                     else:
-                        courses = raw_courses
+                        courses = []
                     profile["courses"] = courses
-                    if not profile.get("all_course_codes"):
-                        profile["all_course_codes"] = [c["code"] for c in courses if c.get("code")] if courses else [profile.get("course_code", "")]
+                    profile["all_course_codes"] = [c["code"] for c in courses if c.get("code")]
 
                     print(f"🎯 Apps Script matched profile: {profile.get('name')} | Courses: {', '.join(profile['all_course_codes'])}", flush=True)
                     return schedule, profile, faqs, None
@@ -619,9 +621,14 @@ def generate_conversational_reply(user_message, user_data):
         for row in monthly_events
     ) if monthly_events else "No monthly lesson data available."
 
-    # Format courses
+    # Format courses with per-course links
+    courses_with_links = profile.get("courses_with_links") or []
+    course_link_map = {}
+    for cwl in courses_with_links:
+        course_link_map[cwl["code"]] = cwl.get("link", "")
+
     courses_text = "\n".join(
-        f"  • {c['code']}{' - ' + c.get('name', '') if c.get('name') else ''}"
+        f"  • {c['code']}{' - ' + c.get('name', '') if c.get('name') else ''}{' → ' + course_link_map.get(c['code'], '') if course_link_map.get(c['code']) else ''}"
         for c in courses if c.get('code')
     ) if courses else "  No courses assigned."
 
@@ -638,6 +645,12 @@ Communicate like a thoughtful human assistant. Adapt your tone to the user's emo
 
 STRICT FACT GUARDRAILS:
 You are free to be creative and conversational in tone, but ALL hard facts (schedules, course codes, lesson links, dates, departments, statuses) MUST come strictly from the LIVE DATABASE RECORD below. If a fact is missing from the record, warmly explain that you don't have access to that specific information yet instead of guessing.
+
+CRITICAL CONSTRAINTS:
+1. DO NOT offer to email, message, or notify Operations Managers on the user's behalf. You do not have an automated email-sending feature enabled yet.
+2. If a user asks to notify their Operations Manager or reschedule a class, provide their Operations Manager's name and email address directly and ask the user to contact them.
+   Example response: "I cannot message your Operations Manager for you directly, but you can reach [Ops Manager Name] at [Ops Manager Email] to request that."
+3. Always include the room_link from the schedule data when giving class details.
 
 ESCALATION PROTOCOL:
 If the user reports an issue that requires human staff intervention (such as illness/absence, missing live lesson links, technical portal errors, or explicitly asking for a human/manager), you MUST append '[TRIGGER_ESCALATION: <Issue Type>]' at the very end of your response text. Examples: '[TRIGGER_ESCALATION: Lecturer Absence]' or '[TRIGGER_ESCALATION: Missing Link]'. Do NOT include this tag for casual conversation, greetings, or simple data queries.
