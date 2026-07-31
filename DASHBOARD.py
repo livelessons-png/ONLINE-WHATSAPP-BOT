@@ -13,7 +13,7 @@ app = Flask(__name__)
 # 1. ENVIRONMENT CONFIGURATION & ALIGNMENT
 # ========================================================
 # Aligning WAHA URL with waha_reminder.py & Render environment
-WAHA_PORT = os.getenv("WHATSAPP_API_PORT", "3000")
+WAHA_PORT = os.getenv("WHATSAPP_API_PORT", "3001")
 WAHA_URL = os.getenv("WAHA_URL", f"http://localhost:{WAHA_PORT}").rstrip("/")
 WEBHOOK_URL = os.getenv("WHATSAPP_HOOK_URL", os.getenv("WEBHOOK_URL", "http://localhost:5000/webhook"))
 WAHA_KEY = os.getenv("WAHA_API_KEY", "")

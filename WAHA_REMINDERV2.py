@@ -177,21 +177,10 @@ def fetch_and_process_reminders():
             if not norm_phone:
                 continue
 
-            # Pass event_id or composite key to make duplicate checks event-specific
-            try:
-                db.insert_sent_reminder(
-                    phone=norm_phone, 
-                    tier=tier, 
-                    event_id=event_id, 
-                    course_code=course_details
-                ) 
-            except Exception as e:
-                if "duplicate" in str(e).lower() or "already exists" in str(e).lower():
-                    logger.info(f"⏩ Skipping duplicate reminder for {norm_phone} ({course_details} - {tier})")
-                    continue
-                else:
-                    logger.error(f"DB Insert Error: {e}")
-                    continue
+            # 🛑 1. EXPLICIT CHECK: Is this reminder already recorded?
+            if db.has_reminder_been_sent(event_id, norm_phone, tier):
+                logger.info(f"⏭️ Skipping duplicate reminder for {norm_phone} ({course_details} - {tier})")
+                continue
 
             # Dynamic Text based on Tier
             action_prompt = ""
@@ -219,22 +208,34 @@ def fetch_and_process_reminders():
                 f"Have an excellent session!"
             )
 
+            # ✅ 2. DISPATCH: Send the WAHA message
             success = send_whatsapp_text(norm_phone, message_text)
 
-            # Human-like delay between dispatches to avoid WAHA burst flags
+            # ✅ 3. RECORD: Only lock it in the DB if the WhatsApp message actually sent
             if success:
+                try:
+                    db.record_sent_reminder(
+                        event_uid=event_id,
+                        phone=norm_phone,
+                        tier=tier,
+                        course_code=course_details,
+                    )
+                except Exception as e:
+                    logger.error(f"❌ Failed to log sent reminder to DB: {e}")
+
+                # Human-like delay between dispatches to avoid WAHA burst flags
                 delay = random.uniform(10, 25)
                 logger.info(f"⏳ Waiting {delay:.0f}s before next dispatch...")
                 time.sleep(delay)
-            
-            # Spawn Escalation Watcher with daemon=True so it doesn't block shutdown
-            if success and tier in ["24_HOURS", "4_HOURS"]:
-                watcher_thread = threading.Thread(
-                    target=auto_escalate_expiry_watcher, 
-                    args=(norm_phone, name, course_details, ops_manager, ops_email, tier),
-                    daemon=True
-                )
-                watcher_thread.start()
+
+                # Spawn Escalation Watcher with daemon=True so it doesn't block shutdown
+                if tier in ["24_HOURS", "4_HOURS"]:
+                    watcher_thread = threading.Thread(
+                        target=auto_escalate_expiry_watcher, 
+                        args=(norm_phone, name, course_details, ops_manager, ops_email, tier),
+                        daemon=True
+                    )
+                    watcher_thread.start()
 
     except Exception as e:
         logger.error(f"💥 Daemon Loop Error: {e}")

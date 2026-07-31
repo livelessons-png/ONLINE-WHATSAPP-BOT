@@ -310,7 +310,7 @@ def insert_sent_reminder(phone, tier="4_HOURS", status="delivered", event_uid=""
     actual_uid = str(event_uid or event_id or "")
 
     # ✅ Direct check before insert as a primary safeguard against duplicates
-    if actual_uid and is_reminder_already_sent(actual_uid, phone, tier):
+    if actual_uid and has_reminder_been_sent(actual_uid, phone, tier):
         raise DuplicateKeyError(f"Duplicate reminder: {actual_uid} for {phone} ({tier}) already sent.")
 
     result = db.sent_reminders.insert_one({
@@ -395,7 +395,12 @@ def reject_change(change_id, reviewed_by="admin", review_note=""):
 # ==========================================
 # SENT REMINDERS (daemon-specific)
 # ==========================================
-def is_reminder_already_sent(event_uid, phone, tier):
+def has_reminder_been_sent(event_uid, phone, tier):
+    """Checks if a reminder for this event has already been processed (and recorded).
+
+    Mirrors the unique index on (event_uid, phone, tier) so the daemon can
+    explicitly look it up instead of relying on insert errors.
+    """
     db = get_db()
     if db is None:
         return False
@@ -408,13 +413,17 @@ def is_reminder_already_sent(event_uid, phone, tier):
 
 
 def record_sent_reminder(event_uid, phone, tier, course_code="", ai_confidence=None):
-    """Records a daemon dispatch. Aligned with dashboard requirements."""
+    """Records a daemon dispatch. Aligned with dashboard requirements.
+
+    Only call this AFTER the WhatsApp message has actually been dispatched.
+    Raises DuplicateKeyError if (event_uid, phone, tier) is already recorded.
+    """
     db = get_db()
     if db is None:
-        return
-    if is_reminder_already_sent(event_uid, phone, tier):
+        return None
+    if has_reminder_been_sent(event_uid, phone, tier):
         raise DuplicateKeyError(f"Duplicate reminder: {event_uid} for {phone} ({tier}) already sent.")
-    db.sent_reminders.insert_one({
+    result = db.sent_reminders.insert_one({
         "event_uid": str(event_uid),
         "course_code": str(course_code),
         "phone": str(phone),
@@ -427,6 +436,7 @@ def record_sent_reminder(event_uid, phone, tier, course_code="", ai_confidence=N
         "questions_count": 0,
         "ai_confidence": ai_confidence,
     })
+    return result.inserted_id
 
 
 def get_analytics_reminders(where_clause=None):
