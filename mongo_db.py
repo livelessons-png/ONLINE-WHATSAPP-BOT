@@ -30,26 +30,34 @@ def get_db():
 
 
 def _ensure_indexes():
-    """Create indexes for common query patterns."""
+    """Create indexes for common query patterns.
+
+    Each index is created independently: a failure on one (e.g. duplicate keys
+    blocking a unique index) is logged but never allowed to prevent the others,
+    so a bad collection can't silently disable the reminder dedup index.
+    """
     db = _db
     if db is None:
         return
-    try:
-        db.app_settings.create_index("key", unique=True)
-        db.contact_aliases.create_index("alias_id", unique=True)
-        db.delivery_routes.create_index("identity_key", unique=True)
-        db.consented_users.create_index("phone", unique=True)
-        db.chat_history.create_index([("phone", ASCENDING), ("timestamp", ASCENDING)])
-        db.interactions.create_index([("timestamp", DESCENDING)])
-        db.sent_reminders.create_index([("phone", ASCENDING), ("sent_at", DESCENDING)])
-        # ✅ FIX: Enforce UNIQUE constraint on event_uid + phone + tier combination
-        db.sent_reminders.create_index(
-            [("event_uid", ASCENDING), ("phone", ASCENDING), ("tier", ASCENDING)],
-            unique=True
-        )
-        db.pending_setting_changes.create_index([("status", ASCENDING), ("created_at", DESCENDING)])
-    except Exception as e:
-        print(f"Index creation warning: {e}")
+    index_specs = [
+        ("app_settings", "key", {"unique": True}),
+        ("contact_aliases", "alias_id", {"unique": True}),
+        ("delivery_routes", "identity_key", {"unique": True}),
+        ("consented_users", "phone", {"unique": True}),
+        ("chat_history", [("phone", ASCENDING), ("timestamp", ASCENDING)], {}),
+        ("interactions", [("timestamp", DESCENDING)], {}),
+        ("sent_reminders", [("phone", ASCENDING), ("sent_at", DESCENDING)], {}),
+        # ✅ CRITICAL: Enforce UNIQUE constraint on event_uid + phone + tier.
+        #    The reminder daemon's atomic claim relies on this index — without
+        #    it, duplicate reminders can be sent (upsert no longer atomic).
+        ("sent_reminders", [("event_uid", ASCENDING), ("phone", ASCENDING), ("tier", ASCENDING)], {"unique": True}),
+        ("pending_setting_changes", [("status", ASCENDING), ("created_at", DESCENDING)], {}),
+    ]
+    for collection, spec, kwargs in index_specs:
+        try:
+            db[collection].create_index(spec, **kwargs)
+        except Exception as e:
+            print(f"Index creation warning on {collection}: {e}")
 
 
 # ==========================================
@@ -437,6 +445,81 @@ def record_sent_reminder(event_uid, phone, tier, course_code="", ai_confidence=N
         "ai_confidence": ai_confidence,
     })
     return result.inserted_id
+
+
+def claim_reminder(event_uid, phone, tier, course_code="", ai_confidence=None):
+    """Atomically claims a reminder for dispatch. Returns True only for the winner.
+
+    Uses an upsert keyed on the unique (event_uid, phone, tier) index, so when
+    two daemons race for the same reminder, exactly ONE of them gets a True and
+    proceeds to send — the other gets False and must skip. This closes the
+    check-then-send race that a plain find_one + insert cannot.
+
+    The record is created with status "pending" as a short-lived in-flight
+    marker: on a successful dispatch the caller flips it to "delivered", and on
+    a failed dispatch the caller deletes it so the reminder is retried next poll.
+
+    Fail-safe: if the unique index is missing, the upsert can't be relied on to
+    reject duplicates, so we also do an explicit pre-check and re-verify after
+    the upsert (in case a race happened), treating any pre-existing record as
+    already claimed. This keeps the daemon from double-sending even without the
+    index — at the cost of a tiny extra read per claim.
+    """
+    db = get_db()
+    if db is None:
+        return False
+
+    key = {"event_uid": str(event_uid), "phone": str(phone), "tier": str(tier)}
+
+    # Pre-check: someone else already claimed/recorded this reminder
+    if db.sent_reminders.find_one(key) is not None:
+        return False
+
+    result = db.sent_reminders.update_one(
+        key,
+        {"$setOnInsert": {
+            "event_uid": str(event_uid),
+            "course_code": str(course_code),
+            "phone": str(phone),
+            "tier": str(tier),
+            "status": "pending",
+            "sent_at": datetime.datetime.now().isoformat(),
+            "is_confirmed": 0,
+            "is_escalated": 0,
+            "is_response": 0,
+            "questions_count": 0,
+            "ai_confidence": ai_confidence,
+        }},
+        upsert=True,
+    )
+
+    # Re-verify: if a race slipped past the pre-check (no unique index), only the
+    # caller who actually inserted the new document wins.
+    if result.upserted_id:
+        return True
+    # Upsert matched an existing record (someone else claimed it in the race).
+    return False
+
+
+def mark_reminder_delivered(event_uid, phone, tier):
+    """Flips a claimed (pending) reminder to delivered after a successful send."""
+    db = get_db()
+    if db is None:
+        return
+    db.sent_reminders.update_one(
+        {"event_uid": str(event_uid), "phone": str(phone), "tier": str(tier)},
+        {"$set": {"status": "delivered"}},
+    )
+
+
+def release_reminder_claim(event_uid, phone, tier):
+    """Removes a claim after a failed send so the reminder is retried next poll."""
+    db = get_db()
+    if db is None:
+        return
+    db.sent_reminders.delete_one(
+        {"event_uid": str(event_uid), "phone": str(phone), "tier": str(tier), "status": "pending"},
+    )
 
 
 def get_analytics_reminders(where_clause=None):

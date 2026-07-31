@@ -177,8 +177,11 @@ def fetch_and_process_reminders():
             if not norm_phone:
                 continue
 
-            # 🛑 1. EXPLICIT CHECK: Is this reminder already recorded?
-            if db.has_reminder_been_sent(event_id, norm_phone, tier):
+            # 🛑 1. ATOMIC CLAIM: Only ONE daemon (of possibly several) may send this.
+            #    The upsert + unique index makes this race-proof — a loser gets
+            #    False and skips, so a duplicate can never be sent even if two
+            #    daemons are running (e.g. start.sh + main.py thread).
+            if not db.claim_reminder(event_id, norm_phone, tier, course_code=course_details):
                 logger.info(f"⏭️ Skipping duplicate reminder for {norm_phone} ({course_details} - {tier})")
                 continue
 
@@ -211,17 +214,12 @@ def fetch_and_process_reminders():
             # ✅ 2. DISPATCH: Send the WAHA message
             success = send_whatsapp_text(norm_phone, message_text)
 
-            # ✅ 3. RECORD: Only lock it in the DB if the WhatsApp message actually sent
             if success:
+                # ✅ 3. MARK DELIVERED: The claim stays as the permanent record
                 try:
-                    db.record_sent_reminder(
-                        event_uid=event_id,
-                        phone=norm_phone,
-                        tier=tier,
-                        course_code=course_details,
-                    )
+                    db.mark_reminder_delivered(event_id, norm_phone, tier)
                 except Exception as e:
-                    logger.error(f"❌ Failed to log sent reminder to DB: {e}")
+                    logger.error(f"❌ Failed to update reminder status to delivered: {e}")
 
                 # Human-like delay between dispatches to avoid WAHA burst flags
                 delay = random.uniform(10, 25)
@@ -236,6 +234,12 @@ def fetch_and_process_reminders():
                         daemon=True
                     )
                     watcher_thread.start()
+            else:
+                # ❌ 3b. RELEASE CLAIM: Send failed, so the next poll retries this reminder
+                try:
+                    db.release_reminder_claim(event_id, norm_phone, tier)
+                except Exception as e:
+                    logger.error(f"❌ Failed to release reminder claim for retry: {e}")
 
     except Exception as e:
         logger.error(f"💥 Daemon Loop Error: {e}")
