@@ -701,10 +701,42 @@ def background_processor(body):
         tutor_phone_raw = extract_sender_chat_id(payload)
         tutor_phone_raw_before_resolve = tutor_phone_raw
         tutor_phone_raw = resolve_lid_to_number(tutor_phone_raw)
-        if not tutor_phone_raw or "@g.us" in tutor_phone_raw or tutor_phone_raw == "status@broadcast":
+        tutor_phone_norm = normalize_phone_for_db(tutor_phone_raw)
+
+        # 🔇 Robust status/group detection:
+        #   - Groups come from @g.us sender IDs.
+        #   - Status updates arrive in several shapes: sender "status@broadcast",
+        #     event/message type "status", "update", or WAHA's status markers in
+        #     the payload. Checking just the sender ID misses statuses that WAHA
+        #     attributes to the author's own number, which is exactly how a
+        #     status text can slip through as if it were a 1:1 message.
+        if not tutor_phone_raw or "@g.us" in tutor_phone_raw:
             return
 
-        tutor_phone_norm = normalize_phone_for_db(tutor_phone_raw)
+        # Status detection from the parsed payload itself (WAHA event shapes):
+        # the event/message type or sender field can carry "status".
+        payload_type = str(payload.get("type") or payload.get("event") or payload.get("eventType") or "").lower()
+        payload_sender = str(payload.get("sender") or payload.get("chatId") or "").lower()
+
+        raw_body_lower = str(body or "").lower()
+        status_markers = (
+            "status@broadcast",
+            "isstatus",
+            "statusv3",
+            "status_v3",
+            "statusshare",
+            '"type":"status"',
+            '"type": "status"',
+        )
+        is_status = (
+            payload_type == "status"
+            or payload_sender == "status@broadcast"
+            or tutor_phone_raw == "status@broadcast"
+            or any(m in raw_body_lower for m in status_markers)
+        )
+        if is_status:
+            print(f"🔇 Silently dropped status update from {tutor_phone_norm}", flush=True)
+            return
 
         # Silent drop: non-text messages (media, reactions, contacts, etc.)
         msg_type = payload.get("type") or ""
@@ -717,6 +749,13 @@ def background_processor(body):
         user_query = extract_message_text(payload)
         if not user_query:
             print(f"🔇 Silently dropped empty message from {tutor_phone_norm}", flush=True)
+            return
+
+        # Silent drop: link-only messages (no real query) — e.g. shared URLs.
+        # Strip any URLs; if nothing meaningful remains, it's just a link share.
+        stripped_of_links = re.sub(r'https?://\S+|www\.\S+', '', user_query, flags=re.I).strip()
+        if not stripped_of_links:
+            print(f"🔇 Silently dropped link-only message from {tutor_phone_norm}", flush=True)
             return
 
         print(f"📥 Processing message from {tutor_phone_norm}: '{user_query}'", flush=True)
