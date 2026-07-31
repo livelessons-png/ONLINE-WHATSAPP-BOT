@@ -241,6 +241,12 @@ def fetch_and_process_reminders():
                 except Exception as e:
                     logger.error(f"❌ Failed to release reminder claim for retry: {e}")
 
+                # Human-like backoff on failure too, so a flaky WAHA doesn't get
+                # hammered by rapid consecutive retries within the same batch
+                delay = random.uniform(5, 12)
+                logger.info(f"⏳ Send failed — waiting {delay:.0f}s before next dispatch...")
+                time.sleep(delay)
+
     except Exception as e:
         logger.error(f"💥 Daemon Loop Error: {e}")
 

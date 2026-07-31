@@ -26,19 +26,15 @@ function doGet(e) {
         return ContentService.createTextOutput(JSON.stringify({ reminders: [] })).setMimeType(ContentService.MimeType.JSON);
       }
 
-      // 2. Filter ONLY events that land inside one of the 3 reminder windows
+      // 2. Filter ONLY events that land inside one of the reminder windows
       var activeEvents = [];
       calEvents.forEach(function(ev) {
         var diffMs = ev.getStartTime().getTime() - now.getTime();
         var diffMins = Math.floor(diffMs / (1000 * 60));
         var tier = null;
 
-        // 24_HOURS Tier (23h 45m to 24h 15m)
-        if (diffMins >= 1425 && diffMins <= 1455) {
-          tier = "24_HOURS";
-        }
         // 4_HOURS Tier (3h 45m to 4h 15m)
-        else if (diffMins >= 225 && diffMins <= 255) {
+        if (diffMins >= 225 && diffMins <= 255) {
           tier = "4_HOURS";
         }
         // 10_MINUTES Tier (5m to 15m)
